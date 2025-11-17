@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<launch>
+	<rosparam command="load" file="$(find my_hero_bci)/config/myfilterchain.yaml"/>
+	<node name="filterchain_node" pkg="rosneuro_filters" type="filterchain_node" output="screen" >
+		<param name="configname" value="MyFilterChain" />
+	</node>	
+</launch>
