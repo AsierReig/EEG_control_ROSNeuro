@@ -81,7 +81,8 @@ Nodo que hace predicción en tiempo real usando modelo entrenado.
 3. Haz un source del entorno:
    ```bash
    source devel/setup.bash
-  
+  ```
+
 ## Uso
 Inicia el núcleo fundamental de ROS:
     ```bash
@@ -120,10 +121,11 @@ Ejecuta nodo de entrenamiento:
     ```
 
 ### Clasificador
-Ejecurta nodo clasificador:
+Ejecuta nodo clasificador:
     ```bash
     rosrun my_hero_bci online_classifier.py
     ```
 
 ## Mejoras
 - Probar fiabilidad del modelo y reentrenar con más datos.
+- Suscribirse a topic exo mano y controlarlo con casco.
