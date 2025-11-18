@@ -84,9 +84,9 @@ Nodo que hace predicción en tiempo real usando modelo entrenado.
 
 ## Uso
 Inicia el núcleo fundamental de ROS:
-    ```bash
-    roscore
-    ```
+```bash
+roscore
+```
 
 ### Adquisición
 Ejecuta el nodo que publica los datos que adquiere el casco:
