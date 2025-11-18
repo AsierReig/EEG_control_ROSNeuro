@@ -67,7 +67,6 @@ Nodo que hace predicción en tiempo real usando modelo entrenado.
   - `/features` (`std_msgs/Float32MultiArray`)
 
 ## Instalación
-
 1. Clona el repositorio en tu espacio de trabajo de ROS:
    ```bash
    git clone
@@ -81,50 +80,51 @@ Nodo que hace predicción en tiempo real usando modelo entrenado.
 3. Haz un source del entorno:
    ```bash
    source devel/setup.bash
-  ```
+   ```
 
 ## Uso
 Inicia el núcleo fundamental de ROS:
     ```bash
     roscore
     ```
+
 ### Adquisición
 Ejecuta el nodo que publica los datos que adquiere el casco:
-    ```bash
-    rosrun rosneuro_acquisition acquisition _plugin:=rosneuro::LSLDevice _framerate:=12.5 _stream_type:=EEG _stream_name:=hero_bitbrain_eeg
-    ```
+```bash
+rosrun rosneuro_acquisition acquisition _plugin:=rosneuro::LSLDevice _framerate:=12.5 _stream_type:=EEG _stream_name:=hero_bitbrain_eeg
+```
+
 ### Filtrado
 Ejecuta el nodo que filtra la señal de entrada a tiempo real.
 Primero debes cargar los parametros en el rosparam server (se han puesto los principales filtros a utilizar):
-    ```bash
-    rosparam load /config/myfilterchain.yaml
-    ```
-    ```bash
-    rosrun rosneuro_filters filterchain_node
-    ```
+```bash
+rosparam load /config/myfilterchain.yaml
+rosrun rosneuro_filters filterchain_node
+```
+
 ### Visualización
 Ejecuta nodo para visualizar señal en tiempo real (puedes visualizar el topic `\neurodata` o `\neurodata_filtered`):
-`   ``bash
-    rosrun rosneuro_visualizer neuroviz
-    ```
+```bash
+rosrun rosneuro_visualizer neuroviz
+```
 
 ### Paradigma visual
 Ejecuta nodo para grabar estímulos:
-    ```bash
-    rosrun my_hero_bci motor_imagery_events.py
-    ```
+```bash
+rosrun my_hero_bci motor_imagery_events.py
+```
 
 ### Entrenamiento
 Ejecuta nodo de entrenamiento:
-    ```bash
-    rosrun my_hero_bci train_model.py
-    ```
+```bash
+rosrun my_hero_bci train_model.py
+```
 
 ### Clasificador
 Ejecuta nodo clasificador:
-    ```bash
-    rosrun my_hero_bci online_classifier.py
-    ```
+```bash
+rosrun my_hero_bci online_classifier.py
+```
 
 ## Mejoras
 - Probar fiabilidad del modelo y reentrenar con más datos.
