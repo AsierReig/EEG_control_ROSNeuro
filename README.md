@@ -15,10 +15,10 @@ En primer lugar, cabe mencionar que nuestro sistema está compuesto de dos PC's,
   
 ##  Paquetes y nodos de ROS-Neuro
 - Para instalar y hacer uso de ROS-Neuro:
-```bash
+
 https://github.com/rosneuro
 
-```
+
 ### `rosneuro_acquisition`
 #### Nodo: `acquisition`
 Este nodo toma datos de dispositivos externos y publica los objetos detectados en el topic `/neurodata`.
