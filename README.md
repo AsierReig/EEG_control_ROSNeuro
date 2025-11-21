@@ -99,6 +99,8 @@ Ejecuta el nodo que filtra la señal de entrada a tiempo real.
 Primero debes cargar los parametros en el rosparam server (se han puesto los principales filtros a utilizar):
 ```bash
 rosparam load /config/myfilterchain.yaml
+```
+```bash
 rosrun rosneuro_filters filterchain_node
 ```
 
