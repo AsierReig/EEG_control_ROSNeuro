@@ -109,15 +109,19 @@ rosrun rosneuro_visualizer neuroviz
 ```
 
 ### Paradigma visual
-Ejecuta nodo para grabar estímulos:
+Ejecuta nodo estímulos:
 ```bash
 rosrun my_hero_bci motor_imagery_events.py
+```
+Simultáneamente graba los topics `\neurodata` y `\neuroevent`:
+```bash
+rosbag record /neurodata /neuroevent
 ```
 
 ### Entrenamiento
 Ejecuta nodo de entrenamiento:
 ```bash
-rosrun my_hero_bci train_model.py
+rosrun my_hero_bci train_model.py --bag name.bag
 ```
 
 ### Clasificador
