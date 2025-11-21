@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-online_classifier_rosneuro.py
-Adaptado para mensajes rosneuro_msgs/NeuroFrame con selección de canales.
+online_classifier_3class.py
+Nodo ROS para clasificación online (3 clases).
+Publica /decision (String con "rest"/"open"/"close"), /decision_proba (Float32MultiArray)
+y /features (Float32MultiArray).
 """
 
 import rospy
@@ -9,123 +11,169 @@ import numpy as np
 import joblib
 from std_msgs.msg import Float32MultiArray, String
 from rosneuro_msgs.msg import NeuroFrame
-from scipy.signal import welch
+from scipy.signal import welch, butter, filtfilt
 from collections import deque
 import threading
 
-class OnlineClassifier:
+# mapa de clases (entrenamiento usa 0,1,2)
+CLASS_MAP = {0: "rest", 1: "open", 2: "close"}
+
+def bandpass_filter(epoch, lowcut=8.0, highcut=30.0, fs=256, order=4):
+    b, a = butter(order, [lowcut/(0.5*fs), highcut/(0.5*fs)], btype='band')
+    return filtfilt(b, a, epoch, axis=1)
+
+def extract_bandpower_from_window(epoch, fs=256, bands=[(8,12),(13,30)]):
+    feats = []
+    for ch in range(epoch.shape[0]):
+        f, Pxx = welch(epoch[ch, :], fs=fs, nperseg=min(256, epoch.shape[1]))
+        for lo, hi in bands:
+            idx = (f>=lo) & (f<=hi)
+            bp = np.trapz(Pxx[idx], f[idx]) if np.any(idx) else 1e-12
+            feats.append(np.log(bp + 1e-12))
+    return np.array(feats, dtype=np.float32)
+
+class OnlineClassifierNode:
     def __init__(self):
-        rospy.init_node('online_classifier', anonymous=False)
-
-        # === Parámetros configurables ===
-        self.model_path     = rospy.get_param('~model_path', '/home/tartaria/catkin_ws/src/my_hero_bci/models/model1.joblib')
-        self.sr             = float(rospy.get_param('~sr', 256.0))
-        self.win_sec        = float(rospy.get_param('~win_sec', 1.0))
-        self.step_sec       = float(rospy.get_param('~step_sec', 0.5))
-        self.bands          = rospy.get_param('~bands', [[8,12], [13,30]])
-        self.proba_thresh   = float(rospy.get_param('~proba_thresh', 0.7))
+        rospy.init_node('online_classifier_3class')
+        # params
+        model_file = rospy.get_param('~model_path', '/home/tartaria/catkin_ws/src/my_hero_bci/models/model1.joblib')
+        self.win_sec = float(rospy.get_param('~win_sec', 1.0))
+        self.step_sec = float(rospy.get_param('~step_sec', 0.5))
+        self.bands = rospy.get_param('~bands', [[8,12],[13,30]])
+        self.proba_thresh = float(rospy.get_param('~proba_thresh', 0.6))
         self.debounce_count = int(rospy.get_param('~debounce_count', 3))
-        self.topic_in       = rospy.get_param('~topic_in', '/neurodata')
-        self.topic_features = rospy.get_param('~topic_features', '/features')
-        self.wanted_channels = rospy.get_param('~wanted_channels', ['eeg:4','eeg:5','eeg:6'])  # canales usados en el entrenamiento
+        self.wanted_channels = rospy.get_param('~wanted_channels', ['eeg:4','eeg:5','eeg:6'])
+        self.topic_in = rospy.get_param('~topic_in', '/neurodata')
 
-        # === Modelo ===
-        self.model = joblib.load(self.model_path)
-        self.classes_ = getattr(self.model, 'classes_', ['class0', 'class1'])
+        data = joblib.load(model_file)
+        # data expected: {'model': clf, 'channels': selected_labels, 'fs': fs}
+        self.clf = data['model'] if isinstance(data, dict) and 'model' in data else data
+        self.trained_channels = data.get('channels', None) if isinstance(data, dict) else None
+        self.trained_fs = data.get('fs', None) if isinstance(data, dict) else None
 
-        # === Buffers ===
+        # internal
+        self.sr = None
         self.nchan = None
         self.win_samples = None
         self.step_samples = None
-        self.buffer = None
-        self.buf_count = 0
+        self.buffer = None  # shape (nchan, current_samples)
         self.lock = threading.Lock()
         self.hist = deque(maxlen=self.debounce_count)
 
-        # === Publicadores ===
+        # pubs/subs
         self.pub_decision = rospy.Publisher('/decision', String, queue_size=1)
-        self.pub_proba    = rospy.Publisher('/decision_proba', Float32MultiArray, queue_size=1)
-        self.pub_features = rospy.Publisher(self.topic_features, Float32MultiArray, queue_size=1)
+        self.pub_proba = rospy.Publisher('/decision_proba', Float32MultiArray, queue_size=1)
+        self.pub_features = rospy.Publisher('/features', Float32MultiArray, queue_size=1)
 
-        # === Suscripción ===
-        rospy.Subscriber(self.topic_in, NeuroFrame, self.msg_cb, queue_size=1)
-        rospy.loginfo("OnlineClassifier listo. Subscrito a %s", self.topic_in)
+        rospy.Subscriber(self.topic_in, NeuroFrame, self.callback, queue_size=1)
+        rospy.loginfo("Online classifier listo. Esperando /neurodata ...")
         rospy.spin()
 
-    # -------------------- CALLBACK --------------------
-    def msg_cb(self, msg):
-        """Procesa un NeuroFrame con EEG"""
-        eeg_data = np.array(msg.eeg.data, dtype=np.float32)
-        nch = msg.eeg.info.nchannels
-        nsamp = msg.eeg.info.nsamples
-        if nch == 0 or nsamp == 0 or eeg_data.size == 0:
-            return
-
-        # Selección de canales
-        ch_idx = [i for i, ch in enumerate(msg.eeg.info.labels) if ch in self.wanted_channels]
-        if not ch_idx:
-            rospy.logwarn_throttle(5, "No se encontraron los canales deseados en el NeuroFrame")
-            return
-        samples = eeg_data.reshape(nsamp, nch).T  # (nchan, nsamp)
-        samples = samples[ch_idx, :]
-
-        # Inicialización buffer
-        if self.nchan is None:
-            self.nchan = samples.shape[0]
-            self.sr = msg.sr
+    def callback(self, msg):
+        # obtener sr (msg.sr según tu formato)
+        if self.sr is None:
+            try:
+                self.sr = int(msg.sr)
+            except:
+                self.sr = int(self.trained_fs) if self.trained_fs is not None else 256
             self.win_samples = int(self.win_sec * self.sr)
             self.step_samples = int(self.step_sec * self.sr)
-            self.buffer = np.zeros((self.nchan, self.win_samples), dtype=np.float32)
-            rospy.loginfo("EEG config detectada: %d canales, SR=%d Hz", self.nchan, self.sr)
+            rospy.loginfo("SR detectado: %d - win_samples=%d step=%d", self.sr, self.win_samples, self.step_samples)
 
-        with self.lock:
-            n_new = samples.shape[1]
-            if n_new >= self.win_samples:
-                self.buffer[:, :] = samples[:, -self.win_samples:]
-                self.buf_count = self.win_samples
-            else:
-                self.buffer = np.roll(self.buffer, -n_new, axis=1)
-                self.buffer[:, -n_new:] = samples
-                self.buf_count = min(self.win_samples, self.buf_count + n_new)
-
-            if self.buf_count >= self.win_samples:
-                feats = self.compute_features(self.buffer)
-                self.pub_features.publish(Float32MultiArray(data=feats.tolist()))
-                self.do_predict(feats)
-
-    # -------------------- FEATURES --------------------
-    def compute_features(self, data_win):
-        feats = []
-        for ch in range(data_win.shape[0]):
-            f, Pxx = welch(data_win[ch, :], fs=self.sr, nperseg=min(256, self.win_samples))
-            for (lo, hi) in self.bands:
-                idx = np.logical_and(f >= lo, f <= hi)
-                bp = np.trapz(Pxx[idx], f[idx]) if np.any(idx) else 1e-12
-                feats.append(np.log(bp + 1e-12))
-        return np.array(feats, dtype=np.float32)
-
-    # -------------------- PREDICCIÓN --------------------
-    def do_predict(self, feats):
-        x = feats.reshape(1, -1)
-        try:
-            proba = self.model.predict_proba(x)[0]
-        except Exception as e:
-            rospy.logwarn_throttle(5, "Error predicción: %s", str(e))
+        ns = msg.eeg.info.nsamples
+        nc = msg.eeg.info.nchannels
+        if ns == 0 or nc == 0:
             return
 
-        self.pub_proba.publish(Float32MultiArray(data=proba.tolist()))
-        idx = int(np.argmax(proba))
-        label = str(self.classes_[idx])
-        self.hist.append(label)
+        data = np.array(msg.eeg.data, dtype=np.float32)
+        # reshape correcto: (nc, ns)
+        try:
+            samples = data.reshape((nc, ns))
+        except:
+            samples = data.reshape((ns, nc)).T
 
-        if len(self.hist) == self.debounce_count and all([l == label for l in self.hist]):
-            if proba[idx] >= self.proba_thresh:
-                self.pub_decision.publish(String(data=label))
-                rospy.loginfo_throttle(2, "Decision: %s (p=%.2f)", label, proba[idx])
+        # seleccionar índices de canales entrenados (por label) o por wanted_channels param
+        labels = [str(x) for x in msg.eeg.info.labels]
+        # decide canales a usar
+        if self.trained_channels:
+            # map trained labels -> indices by substring
+            ch_idx = []
+            for tch in self.trained_channels:
+                for i, lab in enumerate(labels):
+                    if tch.lower() in lab.lower():
+                        ch_idx.append(i)
+                        break
+        else:
+            ch_idx = [i for i, lab in enumerate(labels) if any(w.lower() in lab.lower() for w in self.wanted_channels)]
 
+        if not ch_idx:
+            rospy.logwarn_throttle(10, "No se encontraron canales a usar en NeuroFrame. Labels disponibles: %s", labels)
+            return
+
+        samples = samples[ch_idx, :]  # (n_used_chan, ns)
+
+        with self.lock:
+            if self.buffer is None:
+                self.buffer = samples.copy()
+            else:
+                # concatenar temporalmente por columnas (axis=1)
+                self.buffer = np.hstack([self.buffer, samples])
+                # opcional: mantener solo una ventana máxima para no crecer indefinidamente
+                if self.buffer.shape[1] > max(self.win_samples*10, int(self.sr*60)):
+                    # recortar manteniendo las últimas muestras
+                    self.buffer = self.buffer[:, -self.win_samples*10:]
+
+            # si no hay suficientes muestras para una ventana, salir
+            if self.buffer.shape[1] < self.win_samples:
+                return
+
+            # tomar la última ventana completa
+            window = self.buffer[:, -self.win_samples:]
+            # filtrar (retorna shape (nchan, win_samples))
+            try:
+                window_f = bandpass_filter(window, fs=self.sr)
+            except Exception as e:
+                rospy.logwarn_throttle(5, "Error filtrado: %s", e)
+                return
+
+            # extraer features (debe coincidir con entrenamiento)
+            feats = extract_bandpower_from_window(window_f, fs=self.sr, bands=self.bands)
+            # sanity check dimension
+            n_expected = len(self.trained_channels) * len(self.bands) if self.trained_channels else len(ch_idx) * len(self.bands)
+            if feats.size != n_expected:
+                rospy.logwarn_throttle(5, "Features dim mismatch: got %d expected %d", feats.size, n_expected)
+                # intentar adaptar si posible (recortar o pad)
+                if feats.size < n_expected:
+                    feats = np.pad(feats, (0, n_expected - feats.size), 'constant', constant_values=(0,))
+                else:
+                    feats = feats[:n_expected]
+
+            # publicar features
+            self.pub_features.publish(Float32MultiArray(data=feats.tolist()))
+
+            # predecir
+            try:
+                proba = self.clf.predict_proba(feats.reshape(1, -1))[0]
+            except Exception as e:
+                rospy.logwarn_throttle(5, "Error predicción: %s", e)
+                return
+
+            self.pub_proba.publish(Float32MultiArray(data=proba.tolist()))
+            idx = int(np.argmax(proba))
+            label_text = CLASS_MAP.get(idx, str(idx))
+            self.hist.append((idx, label_text, proba[idx]))
+
+            # debounce: exigir concordancia en hist y umbral de prob
+            if len(self.hist) == self.debounce_count:
+                ids = [h[0] for h in self.hist]
+                topid = ids[0]
+                if all([i == topid for i in ids]) and self.hist[-1][2] >= self.proba_thresh:
+                    # publicar decisión textual
+                    self.pub_decision.publish(String(data=CLASS_MAP.get(topid, str(topid))))
+                    rospy.loginfo_throttle(2, "Decision final: %s p=%.2f", CLASS_MAP.get(topid, str(topid)), self.hist[-1][2])
 
 if __name__ == '__main__':
     try:
-        OnlineClassifier()
+        OnlineClassifierNode()
     except rospy.ROSInterruptException:
         pass

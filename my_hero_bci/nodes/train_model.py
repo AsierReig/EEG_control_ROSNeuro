@@ -1,132 +1,212 @@
 #!/usr/bin/env python3
+"""
+Entrena un LDA para 3 clases (0=rest,1=open,2=close) desde un rosbag con /neurodata (NeuroFrame)
+y /neuroevent (NeuroEvent). Extrae ventanas peri-evento, filtra y calcula bandpower (mu/beta).
+"""
+
 import rosbag
 import numpy as np
 from scipy.signal import welch, butter, filtfilt
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 import joblib
 import argparse
+import sys
 
-# ---------------------------------------------------
-# Filtrado band-pass
-# ---------------------------------------------------
-def bandpass_filter(epoch, lowcut=8, highcut=30, fs=256, order=4):
-    """Filtra epoch en la banda [lowcut, highcut] Hz"""
+# ----- Params de preprocesado -----
+WANTED_CHANNELS_DEFAULT = ['eeg:4','eeg:5','eeg:6']  # cambiar si en tu bag son otros
+LOWCUT = 8.0
+HIGHCUT = 30.0
+FILTER_ORDER = 4
+
+def bandpass_filter(epoch, lowcut=LOWCUT, highcut=HIGHCUT, fs=256, order=FILTER_ORDER):
     b, a = butter(order, [lowcut/(0.5*fs), highcut/(0.5*fs)], btype='band')
+    # epoch: (nchan, nsamples)
     return filtfilt(b, a, epoch, axis=1)
 
-# ---------------------------------------------------
-# Extracción de características
-# ---------------------------------------------------
 def extract_bandpower(epoch, fs=256, bands=[(8,12),(13,30)]):
-    """Calcula log-bandpower por canal y banda"""
     feats = []
-    for ch in epoch:
-        f, Pxx = welch(ch, fs=fs, nperseg=fs)
+    for ch in range(epoch.shape[0]):
+        f, Pxx = welch(epoch[ch, :], fs=fs, nperseg=min(256, epoch.shape[1]))
         for lo, hi in bands:
             idx = (f >= lo) & (f <= hi)
-            feats.append(np.log(np.trapz(Pxx[idx], f[idx]) + 1e-12))
-    return np.array(feats)
+            bp = np.trapz(Pxx[idx], f[idx]) if np.any(idx) else 1e-12
+            feats.append(np.log(bp + 1e-12))
+    return np.array(feats, dtype=np.float32)
 
-# ---------------------------------------------------
-# Carga de datos
-# ---------------------------------------------------
-def load_bag_data(bag_path, eeg_topic='/neurodata', event_topic='/neuroevent'):
-    """Extrae datos EEG y eventos desde rosbag"""
+def load_bag(bag_path, eeg_topic='/neurodata', event_topic='/neuroevent'):
     bag = rosbag.Bag(bag_path)
-    eeg_data = []
-    event_list = []
-    channel_labels = []
+    eeg_data = []   # list of (t_start_sec, ndarray nch x nsamples)
+    events = []     # list of (t_event_sec, event_code)
+    ch_labels = None
+    fs = None
 
-    # Leer EEG
+    # Leer EEG messages (NeuroFrame)
     for _, msg, _ in bag.read_messages(topics=[eeg_topic]):
-        eeg = np.array(msg.eeg.data).reshape(msg.eeg.info.nchannels, msg.eeg.info.nsamples)
-        eeg_data.append((msg.header.stamp.to_sec(), eeg))
-        channel_labels = msg.eeg.info.labels
-
-    # Leer eventos
+        # sample rate is msg.sr (as observed)
+        if fs is None:
+            try:
+                fs = int(msg.sr)
+            except:
+                fs = int(256)
+        ns = msg.eeg.info.nsamples
+        nc = msg.eeg.info.nchannels
+        data = np.array(msg.eeg.data, dtype=np.float32)
+        if data.size != ns * nc:
+            # intenta reorganizar si el orden fuera distinto
+            # pero habitualmente es nc * ns
+            pass
+        # reshape a (ns, nc) y luego transpose a (nc, ns)
+        try:
+            arr = data.reshape((ns, nc)).T  # (nc, ns)
+        except Exception as e:
+            # último recurso: intentar la otra forma
+            arr = data.reshape((nc, ns))
+        eeg_data.append((msg.header.stamp.to_sec(), arr))
+        ch_labels = [str(x) for x in msg.eeg.info.labels]
+    # Leer eventos NeuroEvent
     for _, msg, _ in bag.read_messages(topics=[event_topic]):
-        event_list.append((msg.header.stamp.to_sec(), msg.event))
-
+        # msg.event es un int: 0,1,2
+        events.append((msg.header.stamp.to_sec(), int(msg.event)))
     bag.close()
-    print(f"Loaded {len(eeg_data)} EEG epochs and {len(event_list)} events from {bag_path}")
-    return eeg_data, event_list, channel_labels
+    if fs is None:
+        fs = 256
+    print(f"Loaded {len(eeg_data)} EEG chunks and {len(events)} events. fs={fs}, channels: {ch_labels}")
+    return eeg_data, events, fs, ch_labels
 
-# ---------------------------------------------------
-# Selección de canales
-# ---------------------------------------------------
-def select_channels(eeg_data, ch_labels, wanted=['eeg:4','eeg:5','eeg:6']):
-    idx = [i for i, ch in enumerate(ch_labels) if ch in wanted]
-    print(f"Selected channels: {[ch_labels[i] for i in idx]}")
-    filtered_data = []
-    for t, epoch in eeg_data:
-        filtered_data.append((t, epoch[idx, :]))
-    return filtered_data
+def concat_eeg(eeg_data):
+    """Concatena la señal continua y genera vector de tiempos por muestra (segundos)."""
+    # eeg_data list of (t_chunk_start, arr(nc, ns))
+    if len(eeg_data) == 0:
+        return None, None
+    fs_guess = None
+    # construir arrays
+    signals = [arr for _, arr in eeg_data]
+    times = []
+    for t0, arr in eeg_data:
+        ns = arr.shape[1]
+        times.append(t0 + np.arange(ns) / float(fs_guess if fs_guess else 256.0))
+        if fs_guess is None:
+            # inferir fs as 1 / delta between samples if possible (no robust pero sirve)
+            fs_guess = 256.0
+    eeg_full = np.hstack(signals)  # (nchan, total_samples)
+    # recompute times properly using fs=256 or your fs (we will pass fs externally)
+    return eeg_full
 
-# ---------------------------------------------------
-# Segmentación por eventos
-# ---------------------------------------------------
-def segment_epochs_continuous(eeg_data, events, fs=256, trial_len=6.0, win=1.0, overlap=0.5):
+def segment_peri_event(eeg_full, times_full, events, fs, pre=2.0, dur=6.0, post=2.0, win=1.0, overlap=0.5):
     """
-    Corta la señal continua según los eventos y genera ventanas para entrenamiento
-    trial_len: duración de cada trial en segundos
-    win: ventana para características
-    overlap: solapamiento entre ventanas
+    eeg_full: (nchan, total_samples)
+    times_full: array of timestamps for each sample (len total_samples)
+    events: list of (t_event, label)
+    devuelve X windows y y labels
     """
     X, y = [], []
+    samples_pre = int(pre * fs)
+    samples_dur = int(dur * fs)
+    samples_post = int(post * fs)
+    win_s = int(win * fs)
+    step = int(win_s * (1 - overlap))
 
-    # Concatenar todo EEG en una sola matriz continua
-    eeg_full = np.hstack([epoch for _, epoch in eeg_data])  # nchannels x total_samples
-    time_full = np.hstack([t + np.arange(epoch.shape[1])/fs for t, epoch in eeg_data])  # tiempo de cada muestra
-
-    samples_win = int(fs * win)
-    step = int(samples_win * (1 - overlap))
-    samples_trial = int(fs * trial_len)
-
+    # build times array if not provided
+    # times_full must be length total_samples
     for ev_time, ev_code in events:
-        # índice de inicio del trial
-        idx_start = np.argmin(np.abs(time_full - ev_time))
-        idx_end = idx_start + samples_trial
-        if idx_end > eeg_full.shape[1]:
-            # No hay suficientes muestras hasta el final
+        # encontrar índice en times_full más cercano a ev_time
+        idx = np.argmin(np.abs(times_full - ev_time))
+        start = idx - samples_pre
+        end = idx + samples_dur + samples_post
+        if start < 0 or end > eeg_full.shape[1]:
             continue
-
-        trial = eeg_full[:, idx_start:idx_end]
-        # Filtrado banda mu/beta
+        trial = eeg_full[:, start:end]  # (nchan, samples_trial)
+        # filtrar
         trial = bandpass_filter(trial, fs=fs)
-
-        # Ventanas dentro del trial
-        for start in range(0, trial.shape[1] - samples_win + 1, step):
-            window = trial[:, start:start+samples_win]
+        # sliding windows
+        for s in range(0, trial.shape[1] - win_s + 1, step):
+            window = trial[:, s:s+win_s]
             X.append(window)
             y.append(ev_code)
-
+    if len(X) == 0:
+        return np.zeros((0,)), np.zeros((0,))
     return np.array(X), np.array(y)
 
-# ---------------------------------------------------
-# Main
-# ---------------------------------------------------
+def select_channel_indices(ch_labels, wanted):
+    # Intenta detectar por substring si no coincide exactamente
+    idx = []
+    for w in wanted:
+        found = False
+        for i, ch in enumerate(ch_labels):
+            if w.lower() in ch.lower():
+                idx.append(i)
+                found = True
+                break
+        if not found:
+            # buscar por exact match
+            for i, ch in enumerate(ch_labels):
+                if ch == w:
+                    idx.append(i)
+                    found = True
+                    break
+    return sorted(list(set(idx)))
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bag", required=True, help="/home/tartaria/catkin_ws/src/my_hero_bci/nodes/2025-11-12-09-57-13.bag")
-    parser.add_argument("--model", default="model1.joblib", help="Nombre del modelo de salida")
+    parser.add_argument("--bag", required=True, help="ruta al .bag")
+    parser.add_argument("--model", default="model1.joblib", help="modelo salida")
+    parser.add_argument("--wanted", nargs='+', default=WANTED_CHANNELS_DEFAULT, help="canales deseados")
+    parser.add_argument("--pre", type=float, default=2.0)
+    parser.add_argument("--dur", type=float, default=6.0)
+    parser.add_argument("--post", type=float, default=2.0)
+    parser.add_argument("--win", type=float, default=1.0)
+    parser.add_argument("--overlap", type=float, default=0.5)
     args = parser.parse_args()
 
-    eeg_data, events, ch_labels = load_bag_data(args.bag)
-    eeg_data = select_channels(eeg_data, ch_labels)
+    eeg_chunks, events, fs, ch_labels = load_bag(args.bag)
+    if len(eeg_chunks) == 0:
+        print("No hay datos EEG en el bag.")
+        sys.exit(1)
+    if len(events) == 0:
+        print("No hay eventos en el bag.")
+        sys.exit(1)
 
-    X, y = segment_epochs_continuous(eeg_data, events)
-    print(f"Segmented into {len(X)} windows")
+    # concatenar señal continua y generar vector de tiempos
+    # construir eeg_full and times_full properly using fs
+    signals = [arr for _, arr in eeg_chunks]
+    eeg_full = np.hstack(signals)  # (nchan, total_samples)
+    # construir times_full as continuous increasing using first chunk time and fs
+    start_time = eeg_chunks[0][0]
+    total_samples = eeg_full.shape[1]
+    times_full = start_time + np.arange(total_samples) / float(fs)
 
-    X_feats = np.array([extract_bandpower(x) for x in X])
-    print(f"Feature shape: {X_feats.shape}")
+    # seleccionar índices de canales
+    idxs = select_channel_indices(ch_labels, args.wanted)
+    if not idxs:
+        print("No se encontraron canales solicitados. Canales disponibles:", ch_labels)
+        sys.exit(1)
+    eeg_full = eeg_full[idxs, :]
+    selected_labels = [ch_labels[i] for i in idxs]
+    print("Selected channels:", selected_labels)
 
-    lda = LinearDiscriminantAnalysis()
-    lda.fit(X_feats, y)
-    joblib.dump(lda, args.model)
-    print(f"Model saved to {args.model}")
+    # segmentación peri-evento
+    X, y = segment_peri_event(eeg_full, times_full, events, fs,
+                              pre=args.pre, dur=args.dur, post=args.post,
+                              win=args.win, overlap=args.overlap)
+
+    print(f"Segmented into {len(X)} windows. Labels distribution:", np.unique(y, return_counts=True))
+    if len(X) == 0:
+        print("No se generaron ventanas. Revisa duración del trial / fs / alignment.")
+        sys.exit(1)
+
+    # extraer features
+    X_feats = np.array([extract_bandpower(window, fs=fs) for window in X])
+    print("Feature shape:", X_feats.shape)
+
+    # entrenar LDA
+    clf = LinearDiscriminantAnalysis()
+    clf.fit(X_feats, y)
+    joblib.dump({'model': clf, 'channels': selected_labels, 'fs': fs}, args.model)
+    print("Modelo guardado en", args.model)
 
 if __name__ == "__main__":
     main()
+
 
 
 

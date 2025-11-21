@@ -7,9 +7,9 @@ import time
 
 # Duraciones (segundos)
 REST_TIME = 5
-OPEN_TIME = 8
-CLOSE_TIME = 8
-REPETITIONS = 40
+OPEN_TIME = 5
+CLOSE_TIME = 5
+REPETITIONS = 25
 
 def publish_event(pub, event_id, description):
     """Publica un mensaje NeuroEvent en /neuroevent"""
