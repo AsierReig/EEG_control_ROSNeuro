@@ -6,8 +6,10 @@ y /neuroevent (NeuroEvent). Extrae ventanas peri-evento, filtra y calcula bandpo
 
 import rosbag
 import numpy as np
+import matplotlib.pyplot as plt
 from scipy.signal import welch, butter, filtfilt
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
 import joblib
 import argparse
 import sys
@@ -203,6 +205,28 @@ def main():
     clf.fit(X_feats, y)
     joblib.dump({'model': clf, 'channels': selected_labels, 'fs': fs}, args.model)
     print("Modelo guardado en", args.model)
+
+
+    # === Métricas ===
+    loaded = joblib.load(args.model)
+    clf = loaded['model']  # EXTRAER EL LDA REAL
+    y_pred = clf.predict(X_feats)
+    acc = accuracy_score(y, y_pred)
+    print("Accuracy:", acc)
+
+    print("\n=== Classification report ===")
+    print(classification_report(y, y_pred))
+
+    print("\n=== Confusion matrix ===")
+    print(confusion_matrix(y, y_pred))
+
+    # === Matriz de confusión gráfica ===
+    plt.imshow(confusion_matrix(y, y_pred), cmap='Blues')
+    plt.colorbar()
+    plt.title("Confusion matrix")
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.show()
 
 if __name__ == "__main__":
     main()
