@@ -34,7 +34,7 @@ def extract_bandpower_from_window(epoch, fs=256, bands=[(8,12),(13,30)]):
 
 class OnlineClassifierNode:
     def __init__(self):
-        rospy.init_node('online_classifier_3class')
+        rospy.init_node('online_classifier')
         # params
         model_file = rospy.get_param('~model_path', '/home/tartaria/catkin_ws/src/my_hero_bci/models/model1.joblib')
         self.win_sec = float(rospy.get_param('~win_sec', 1.0))
@@ -48,6 +48,7 @@ class OnlineClassifierNode:
         data = joblib.load(model_file)
         # data expected: {'model': clf, 'channels': selected_labels, 'fs': fs}
         self.clf = data['model'] if isinstance(data, dict) and 'model' in data else data
+        self.scaler = data.get('scaler', None) if isinstance(data, dict) else None
         self.trained_channels = data.get('channels', None) if isinstance(data, dict) else None
         self.trained_fs = data.get('fs', None) if isinstance(data, dict) else None
 
@@ -138,6 +139,13 @@ class OnlineClassifierNode:
 
             # extraer features (debe coincidir con entrenamiento)
             feats = extract_bandpower_from_window(window_f, fs=self.sr, bands=self.bands)
+            # apply scaler
+            if self.scaler is not None:
+                try:
+                    feats = self.scaler.transform(feats.reshape(1, -1)).ravel()
+                except Exception:
+                    feats = feats
+                    
             # sanity check dimension
             n_expected = len(self.trained_channels) * len(self.bands) if self.trained_channels else len(ch_idx) * len(self.bands)
             if feats.size != n_expected:

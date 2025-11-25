@@ -9,6 +9,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import welch, butter, filtfilt
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
 import joblib
 import argparse
@@ -60,7 +62,7 @@ def load_bag(bag_path, eeg_topic='/neurodata', event_topic='/neuroevent'):
         # reshape a (ns, nc) y luego transpose a (nc, ns)
         try:
             arr = data.reshape((ns, nc)).T  # (nc, ns)
-        except Exception as e:
+        except:
             # último recurso: intentar la otra forma
             arr = data.reshape((nc, ns))
         eeg_data.append((msg.header.stamp.to_sec(), arr))
@@ -200,9 +202,18 @@ def main():
     X_feats = np.array([extract_bandpower(window, fs=fs) for window in X])
     print("Feature shape:", X_feats.shape)
 
-    # entrenar LDA
+     # normalize
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_feats)
+
+    # entrenar LDA + crossval
     clf = LinearDiscriminantAnalysis()
-    clf.fit(X_feats, y)
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    scores = cross_val_score(clf, X_scaled, y, cv=cv)
+    print("Cross-val accuracy (5-fold):", scores, " mean:", np.mean(scores))
+
+    clf.fit(X_scaled, y)
+
     joblib.dump({'model': clf, 'channels': selected_labels, 'fs': fs}, args.model)
     print("Modelo guardado en", args.model)
 
@@ -210,7 +221,7 @@ def main():
     # === Métricas ===
     loaded = joblib.load(args.model)
     clf = loaded['model']  # EXTRAER EL LDA REAL
-    y_pred = clf.predict(X_feats)
+    y_pred = clf.predict(X_scaled)
     acc = accuracy_score(y, y_pred)
     print("Accuracy:", acc)
 
@@ -221,11 +232,37 @@ def main():
     print(confusion_matrix(y, y_pred))
 
     # === Matriz de confusión gráfica ===
-    plt.imshow(confusion_matrix(y, y_pred), cmap='Blues')
+    cm = confusion_matrix(y, y_pred)
+    plt.figure()
+    plt.imshow(cm, cmap='Blues')
     plt.colorbar()
     plt.title("Confusion matrix")
     plt.xlabel("Predicted")
     plt.ylabel("True")
+    plt.xticks([0,1,2], ['rest','open','close'])
+    plt.yticks([0,1,2], ['rest','open','close'])
+    for (i,j), val in np.ndenumerate(cm):
+        plt.text(j, i, int(val), ha='center', va='center', color='white' if val>np.max(cm)/2 else 'black')
+    plt.show()
+
+    # quick ERD/ERS bar plot by class using central channel average
+    class_trials = {0: [], 1: [], 2: []}
+    # rebuild trial grouping from X (windows) and y
+    # average bandpower per window
+    for win, lab in zip(X, y):
+        bp_mu = np.mean([np.exp(f) for f in extract_bandpower(win, fs=fs, bands=[(8,12)])])  # approx inverse log
+        bp_beta = np.mean([np.exp(f) for f in extract_bandpower(win, fs=fs, bands=[(13,30)])])
+        class_trials[lab].append((bp_mu, bp_beta))
+    mu_means = [np.mean([t[0] for t in class_trials[c]]) if len(class_trials[c])>0 else 0 for c in [0,1,2]]
+    beta_means = [np.mean([t[1] for t in class_trials[c]]) if len(class_trials[c])>0 else 0 for c in [0,1,2]]
+
+    plt.figure()
+    x = np.arange(3)
+    plt.bar(x-0.15, mu_means, width=0.3, label='mu')
+    plt.bar(x+0.15, beta_means, width=0.3, label='beta')
+    plt.xticks(x, ['rest','open','close'])
+    plt.legend()
+    plt.title("ERD/ERS aprox. (bandpower) por clase")
     plt.show()
 
 if __name__ == "__main__":

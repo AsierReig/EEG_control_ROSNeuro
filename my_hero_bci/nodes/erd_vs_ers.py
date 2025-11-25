@@ -3,13 +3,9 @@ import rosbag
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.signal import butter, filtfilt, welch
+from scipy.signal import welch
 
 BANDS = {"mu": (8, 12), "beta": (13, 30)}
-
-def butter_bandpass(lo, hi, fs, order=4):
-    b, a = butter(order, [lo/(fs/2), hi/(fs/2)], btype='band')
-    return b, a
 
 def compute_bandpower(signal, fs, lo, hi):
     f, Pxx = welch(signal, fs=fs, nperseg=256)
@@ -19,7 +15,6 @@ def compute_bandpower(signal, fs, lo, hi):
 def main(bagfile):
     print("Cargando rosbag:", bagfile)
     bag = rosbag.Bag(bagfile)
-
     events = []
     eeg_segments = []
     sr = None
