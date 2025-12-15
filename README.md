@@ -40,7 +40,7 @@ Nodo encargado de filtrar los datos de entrada. Diferentes filtros desarrollados
 #### Nodo: `neuroviz`
 Nodo encargado de visualizar la señal de EEG del casco.
 
-## Paquetes y nodos propios
+## Paquetes y nodos/scripts propios
 ### `my_hero_bci`
 #### Nodo: `motor_imagery_events`
 Nodo que muestra una ventana gráfica con instrucciones y va guiando con estímulos: "Reposo", "Abrir mano", "Cerrar mano". Cada vez que cambia de estímulo publica un mensaje en `\neuroevent` con un código de evento.
@@ -48,12 +48,8 @@ Nodo que muestra una ventana gráfica con instrucciones y va guiando con estímu
 - **Publicaciones**:
   - `/neuroevent` (`rosneuro_msgs/NeuroEvent`)
 
-#### Nodo: `train_model`
-Nodo que lee los topics `\neurodata` y `\neuroevent` desde un .bag, extrae las señales EEG (canales 4,5 y 6), segmenta por eventos en ventanas solapadas , filtrando usando un band-pass y calculando bandpower logarítmica en bandas mu y beta. Entrena un LDA y guarda el modelo como .joblib.
-
-- **Suscripciones**:
-  - `/neurodata` (`rosneuro_msgs/NeuroFrame`)
-  - `/neuroevent` (`rosneuro_msgs/NeuroEvent`)
+#### Script: `train_model`
+Script que lee los topics `\neurodata` y `\neuroevent` desde un .bag, extrae las señales EEG (canales 4,5 y 6), segmenta por eventos en ventanas solapadas , filtrando usando un band-pass y calculando bandpower logarítmica en bandas mu y beta. Entrena un LDA y guarda el modelo como .joblib.
 
 #### Nodo: `online_classifier`
 Nodo que hace predicción en tiempo real usando modelo entrenado.
@@ -65,6 +61,12 @@ Nodo que hace predicción en tiempo real usando modelo entrenado.
   - `/decision` (`std_msgs/String`)  
   - `/decision_proba` (`std_msgs/Float32MultiArray`)
   - `/features` (`std_msgs/Float32MultiArray`)
+
+#### Script: `erd_vs_ers`
+Script para visualizar ERD/ERS por clases.
+
+#### Script: `time_frecuency_analysis`
+Script para analizar ERD/ERS con time-frecuency y obtener mapas temporales por banda, alineados a los eventos del .bag.
 
 ## Instalación
 1. Clona el repositorio en tu espacio de trabajo de ROS:
@@ -121,9 +123,9 @@ rosbag record /neurodata /neuroevent
 ```
 
 ### Entrenamiento
-Ejecuta nodo de entrenamiento:
+Ejecuta script de entrenamiento:
 ```bash
-rosrun my_hero_bci train_model.py --bag name.bag
+python3 train_model.py --bag name.bag
 ```
 
 ### Clasificador
@@ -131,6 +133,15 @@ Ejecuta nodo clasificador:
 ```bash
 rosrun my_hero_bci online_classifier.py
 ```
+
+### ERS vs ERS y TFR
+Scripts para visualizar gráficos comparativos entre eventos y respuesta en frecuencia:
+```bash
+python3 erd_vs_ers.py
+```
+```bash
+python3 time_frecuency_analysis.py
+``` 
 
 ## Mejoras
 - Probar fiabilidad del modelo y reentrenar con más datos.
